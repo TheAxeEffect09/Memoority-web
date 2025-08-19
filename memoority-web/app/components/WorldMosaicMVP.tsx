@@ -3,7 +3,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3-geo";
 import { feature } from "topojson-client";
+import world110m from "world-atlas/countries-110m.json";
+import type { FeatureCollection, Feature, Geometry } from "geojson";
 
+/** ——— Branding ——— */
 const COLORS = {
   bgDark: "#0B1E3F",
   bgNavy: "#091A33",
@@ -13,81 +16,127 @@ const COLORS = {
   ink: "#EDEBE6",
 };
 
+/** ——— Typen ——— */
 type Status = "EMPTY" | "APPROVED";
 type Cell = {
   id: string;
-  lon: number; lat: number; x: number; y: number;
+  lon: number;
+  lat: number;
+  x: number;
+  y: number;
   status: Status;
   priceCents: number;
-  imageThumbUrl?: string; imageFullUrl?: string; hoverText?: string; title?: string;
+  imageThumbUrl?: string;
+  imageFullUrl?: string;
+  hoverText?: string;
+  title?: string;
+  country?: string;
+};
+type Tooltip = {
+  x: number;
+  y: number;
+  cell: Cell;
 };
 
-export default function WorldMosaicMVP() {
-  const WIDTH = 1200, HEIGHT = 680, STEP_DEG = 3, DOT = 8;
+/** Minimal-„Topology“-Typ, damit TS nicht meckert */
+type TopologyLike = { objects: any };
 
+export default function WorldMosaicMVP() {
+  const WIDTH = 1200;
+  const HEIGHT = 680;
+  const STEP_DEG = 3; // Raster-Auflösung
+  const DOT = 8; // Punktgröße
+
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  const [cells, setCells] = useState<Cell[]>([]);
+  const [hover, setHover] = useState<Tooltip | null>(null);
+  const [selected, setSelected] = useState<Cell | null>(null);
+  const [showBuy, setShowBuy] = useState<Cell | null>(null);
+
+  /** Projektion + Path */
   const projection = useMemo(
     () => d3.geoNaturalEarth1().fitExtent([[20, 20], [WIDTH - 20, HEIGHT - 20]], { type: "Sphere" } as any),
     []
   );
   const path = useMemo(() => d3.geoPath(projection), [projection]);
 
-  const [cells, setCells] = useState<Cell[]>([]);
-  const [hover, setHover] = useState<{ cell: Cell; x: number; y: number } | null>(null);
-  const [selected, setSelected] = useState<Cell | null>(null);
-  const [showBuy, setShowBuy] = useState<Cell | null>(null);
+  /** Länder & Landflächen extrahieren (TopoJSON → GeoJSON) */
+  const countries = useMemo<FeatureCollection<Geometry>>(() => {
+    const topo = world110m as unknown as TopologyLike;
+    // unknown-Zwischencast → korrektes FeatureCollection-Resultat
+    return feature(topo as any, (topo.objects as any).countries) as unknown as FeatureCollection<Geometry>;
+  }, []);
 
+  const land = useMemo<Feature<Geometry>>(() => {
+    const topo = world110m as unknown as TopologyLike;
+    return feature(topo as any, (topo.objects as any).land) as unknown as Feature<Geometry>;
+  }, []);
+
+  /** Raster generieren (nur Punkte, die auf Land liegen) */
   useEffect(() => {
     let mounted = true;
-    (async () => {
-      const worldTopo = (await import("world-atlas/countries-110m.json")).default as any;
-      const land = feature(worldTopo, worldTopo.objects.land);
-      const generated: Cell[] = [];
 
-      for (let lat = 85; lat >= -85; lat -= STEP_DEG) {
-        for (let lon = -180; lon <= 180; lon += STEP_DEG) {
-          const pt: [number, number] = [lon, lat];
-          // @ts-ignore available at runtime
-          const onLand = d3.geoContains(land as any, pt);
-          if (!onLand) continue;
-          const p = projection(pt); if (!p) continue;
-          const [x, y] = p;
-          generated.push({
-            id: `${lon}_${lat}`, lon, lat, x, y,
-            status: Math.random() < 0.08 ? "APPROVED" : "EMPTY",
-            priceCents: priceFor(lat, lon),
-          });
-        }
+    const generated: Cell[] = [];
+    for (let lat = 85; lat >= -85; lat -= STEP_DEG) {
+      for (let lon = -180; lon <= 180; lon += STEP_DEG) {
+        const geoPt: [number, number] = [lon, lat];
+
+        // Prüfen, ob Punkt auf Land liegt
+        const onLand = d3.geoContains(land as any, geoPt);
+        if (!onLand) continue;
+
+        const p = projection(geoPt);
+        if (!p) continue;
+        const [x, y] = p;
+
+        // Land bestimmen für Tooltip
+        const ctry = countries.features.find((f) => d3.geoContains(f as any, geoPt));
+        const price = priceFor(lat, lon);
+
+        generated.push({
+          id: `${lon}_${lat}`,
+          lon,
+          lat,
+          x,
+          y,
+          status: Math.random() < 0.08 ? "APPROVED" : "EMPTY",
+          priceCents: price,
+          country: (ctry?.properties as any)?.name ?? undefined,
+        });
       }
+    }
 
-      const thumbs = [
-        "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?q=80&w=400&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1520975938310-4487bca9e089?q=80&w=400&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1520975922213-8bdf0f12bc1b?q=80&w=400&auto=format&fit=crop",
-      ];
-      const filled = generated.map((c, i) =>
-        c.status === "APPROVED"
-          ? {
-              ...c,
-              imageThumbUrl: thumbs[i % thumbs.length],
-              imageFullUrl: thumbs[i % thumbs.length].replace("w=400", "w=1600"),
-              hoverText: `Greetings from ${approxRegion(c.lat, c.lon)}!`,
-              title: `Example #${i}`,
-            }
-          : c
-      );
+    // Demo-Bilder/Texte für APPROVED
+    const thumbs = [
+      "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?q=80&w=400&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1520975938310-4487bca9e089?q=80&w=400&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1520975922213-8bdf0f12bc1b?q=80&w=400&auto=format&fit=crop",
+    ];
+    const filled = generated.map((c, i) =>
+      c.status === "APPROVED"
+        ? {
+            ...c,
+            imageThumbUrl: thumbs[i % thumbs.length],
+            imageFullUrl: thumbs[i % thumbs.length].replace("w=400", "w=1600"),
+            hoverText: `Greetings from ${c.country ?? approxRegion(c.lat, c.lon)}!`,
+            title: `Example #${i}`,
+          }
+        : c
+    );
 
-      if (mounted) setCells(filled);
-    })();
-    return () => { mounted = false; };
-  }, [projection]);
+    if (mounted) setCells(filled);
+    return () => {
+      mounted = false;
+    };
+  }, [projection, land, countries]);
 
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-
-  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!hover || !wrapRef.current) return;
-    const rect = wrapRef.current.getBoundingClientRect();
-    setHover({ cell: hover.cell, x: e.clientX - rect.left, y: e.clientY - rect.top });
+  /** Hover-Position innerhalb des Wrappers berechnen */
+  const localPoint = (e: React.MouseEvent) => {
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
   return (
@@ -105,7 +154,7 @@ export default function WorldMosaicMVP() {
           style={{
             position: "relative",
             borderRadius: 16,
-            overflow: "visible", // wenn du Abschneiden willst: "hidden"
+            overflow: "visible", // ggf. "hidden" wenn Tooltip nicht rausstehen soll
             border: `1px solid rgba(201,162,39,0.35)`,
             background: COLORS.bgNavy,
           }}
@@ -115,9 +164,8 @@ export default function WorldMosaicMVP() {
             viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
             style={{ width: "100%", height: "min(70vh, 720px)", display: "block" }}
           >
-            {/* Hintergrund */}
+            {/* Hintergrund + Kugel */}
             <rect x={0} y={0} width={WIDTH} height={HEIGHT} fill={COLORS.bgNavy} />
-            {/* Kugel */}
             <path d={path({ type: "Sphere" } as any) || undefined} fill={COLORS.sphere} />
 
             {/* Zellen */}
@@ -125,17 +173,21 @@ export default function WorldMosaicMVP() {
               <g
                 key={c.id}
                 onMouseMove={(e) => {
-                  const rect = wrapRef.current?.getBoundingClientRect();
-                  setHover({
-                    cell: c,
-                    x: e.clientX - (rect?.left ?? 0),
-                    y: e.clientY - (rect?.top ?? 0),
-                  });
+                  const pos = localPoint(e);
+                  setHover({ x: pos.x, y: pos.y, cell: c });
                 }}
                 onMouseLeave={() => setHover(null)}
                 onClick={() => (c.status === "EMPTY" ? setShowBuy(c) : setSelected(c))}
                 style={{ cursor: "pointer" }}
               >
+                {/* Hit-Target */}
+                <circle
+                  cx={c.x}
+                  cy={c.y}
+                  r={DOT / 2 + 3}
+                  fill="rgba(0,0,0,0)"   // „bemalt“, aber unsichtbar
+                  pointerEvents="all"
+                />
                 {c.status === "APPROVED" && c.imageThumbUrl ? (
                   <>
                     <defs>
@@ -151,6 +203,7 @@ export default function WorldMosaicMVP() {
                       height={DOT}
                       preserveAspectRatio="xMidYMid slice"
                       clipPath={`url(#clip_${c.id})`}
+                      pointerEvents="none"
                     />
                     <circle
                       cx={c.x}
@@ -160,6 +213,7 @@ export default function WorldMosaicMVP() {
                       stroke={COLORS.gold}
                       strokeOpacity={0.6}
                       strokeWidth={0.7}
+                      pointerEvents="none"
                     />
                   </>
                 ) : (
@@ -172,6 +226,7 @@ export default function WorldMosaicMVP() {
                     stroke={COLORS.gold}
                     strokeOpacity={0.25}
                     strokeWidth={0.5}
+                    pointerEvents="none"
                   />
                 )}
               </g>
@@ -195,11 +250,25 @@ export default function WorldMosaicMVP() {
                 color: COLORS.ink,
                 pointerEvents: "none",
                 transform: "translateZ(0)",
+                maxWidth: 260,
               }}
             >
-              {hover.cell.status === "EMPTY"
-                ? `Preis: € ${(hover.cell.priceCents / 100).toFixed(2)}`
-                : hover.cell.hoverText || "—"}
+              {hover.cell.status === "EMPTY" ? (
+                <>
+                  <div>💸 Preis: € {(hover.cell.priceCents / 100).toFixed(2)}</div>
+                  <div>🌍 Land: {hover.cell.country ?? "Unbekannt"}</div>
+                  <div>
+                    📍 {hover.cell.lat.toFixed(1)}°, {hover.cell.lon.toFixed(1)}°
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>{hover.cell.hoverText || "—"}</div>
+                  <div style={{ opacity: 0.8, marginTop: 4, fontSize: 12 }}>
+                    {hover.cell.country ?? "Unbekannt"} · {hover.cell.lat.toFixed(1)}°, {hover.cell.lon.toFixed(1)}°
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -338,8 +407,9 @@ export default function WorldMosaicMVP() {
   );
 }
 
+/** ——— Helpers ——— */
 function priceFor(lat: number, lon: number) {
-  const base = 199;
+  const base = 199; // 1,99 €
   const band = 1 + 0.4 * Math.exp(-Math.pow(lat / 40, 2));
   const jitter = 0.9 + Math.random() * 0.2;
   return Math.round(base * band * jitter);
